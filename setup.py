@@ -3,12 +3,13 @@ from setuptools import setup
 setup(name='lumina_structs',
       version='0.1',
       description='Protocol definitions for Lumina',
-      author='Synacktiv',
+      author='Synacktiv, Maple Bacon',
       maintainer='Maple Bacon',
       packages=['lumina_structs'],
       package_dir={
         'lumina_structs': '.',
       },
+      install_requires=["construct"],
       include_package_data=True,
       exclude_package_data={
         '': ['setup.py']
