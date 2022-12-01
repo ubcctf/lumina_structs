@@ -34,7 +34,7 @@ MetadataType = con.Enum(IdaVarInt32,
     MD_INSN_OPREPRS = 0x0a,
 )
 
-SerializedTypeInfo = con.RestreamData(con.NullTerminated(con.GreedyBytes, require=False), TypeInfo)
+SerializedTypeInfo = con.NullTerminated(con.GreedyBytes, require=False)
 
 Metadata_TypeInfo = con.Struct(
     "is_auto" / con.Byte,
@@ -139,7 +139,7 @@ InsnOprepr = con.Struct(
 )
 FrameVarType = con.Struct(
     "tinfo" / SerializedTypeInfo,
-    "names" / con.RestreamData(con.NullTerminated(con.GreedyBytes), con.GreedyRange(TypeInfoString)),
+    "names" / con.NullTerminated(con.GreedyRange(TypeInfoString)),
 )
 FrameVar = con.Struct(
     "flags" / con.Byte,
@@ -198,12 +198,12 @@ class MetadataPayload(Construct):
 
         return con.Container(size=n, chunks=con.ListContainer(mds))
 
-    #TODO untested
     def _build(self, obj, stream, context, path):
         payload = b''
 
-        for o in obj:
-            payload += MetadataType.build(o.type) + Metadata.build(o.data)
+        for o in obj.chunks:
+            md = Metadata.build(o.data, code=o.type)
+            payload += MetadataType.build(o.type) + bytes([len(md)]) + md + o.unparsed
 
         payload = IdaVarInt32.build(len(payload)) + payload
 
