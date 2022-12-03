@@ -1,5 +1,6 @@
 import construct as con
 from .basetypes import *
+from .util import AttrDict
 import io
 import copy
 
@@ -100,6 +101,9 @@ class InsnAnnotations(con.Subconstruct):
         if not obj:
             return
 
+        if type(obj) == dict:
+            obj = AttrDict(obj)
+
         obj_it = iter(obj)
         first = next(obj_it)
         cur_offset = first.offset
@@ -132,10 +136,10 @@ FrameVarRepr = con.Struct(
     "off_info" / con.If((con.this.flags & 0xf) == 0x5, RefInfo),
 )
 InsnOprepr = con.Struct(
-    "offset" / IdaVarInt32,
+    "offset" / IdaVarInt32,      #offset of insn
     "flags" / con.Byte,
-    "off1_info" / con.If((con.this.flags & 0xf) == 0x5, RefInfo),
-    "off2_info" / con.If((con.this.flags & 0xf0) == 0x50, RefInfo),
+    "off1_info" / con.If((con.this.flags & 0xf) == 0x5, RefInfo),   #first operand offset info if any else none
+    "off2_info" / con.If((con.this.flags & 0xf0) == 0x50, RefInfo), #second operand
 )
 FrameVarType = con.Struct(
     "tinfo" / SerializedTypeInfo,
@@ -201,9 +205,15 @@ class MetadataPayload(Construct):
     def _build(self, obj, stream, context, path):
         payload = b''
 
+        if type(obj) == dict:
+            obj = AttrDict(obj)
+
         for o in obj.chunks:
+            if type(o) == dict:
+                o = AttrDict(o)
+
             md = Metadata.build(o.data, code=o.type)
-            payload += MetadataType.build(o.type) + bytes([len(md)]) + md + o.unparsed
+            payload += MetadataType.build(o.type) + IdaVarInt32.build(len(md)) + md + o.unparsed
 
         payload = IdaVarInt32.build(len(payload)) + payload
 
