@@ -106,6 +106,10 @@ class InsnAnnotations(con.Subconstruct):
 
         obj_it = iter(obj)
         first = next(obj_it)
+
+        if type(first) == dict:
+            first = AttrDict(first)
+
         cur_offset = first.offset
         self.subcon._build(first, stream, context, path)
 

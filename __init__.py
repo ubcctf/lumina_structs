@@ -90,8 +90,8 @@ RpcMessage_FAIL = con.Struct(
 RpcMessage_HELO = con.Struct(
     "protocol" / con.Default(IdaVarInt32, IDA_PROTOCOL_VERSION),
     "hexrays_license" / VarBuff,                    # ida.key file content
-    "hexrays_id" / Hex(Int32ul),                    # internal licence_info
-    "watermark" / Hex(Int16ul),                      # internal licence_info
+    "hexrays_id" / Hex(Int32ul),                    # internal license_info
+    "watermark" / Hex(Int16ul),                     # internal license_info
     "field_0x36" / IdaVarInt32,                     # always zero ?
 )
 
@@ -193,6 +193,6 @@ def rpc_message_parse(source):
         packet = rpc_packet_t.parse_stream(source)
 
     message = RpcMessage.parse(packet.data , code = packet.code)
-    # Warning: parsing return a Container object wich hold a io.BytesIO to the socket
+    # Warning: parsing return a Container object which hold a io.BytesIO to the socket
     # see https://github.com/construct/construct/issues/852
     return packet, message
