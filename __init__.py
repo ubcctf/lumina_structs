@@ -90,8 +90,7 @@ RpcMessage_FAIL = con.Struct(
 RpcMessage_HELO = con.Struct(
     "protocol" / con.Default(IdaVarInt32, IDA_PROTOCOL_VERSION),
     "hexrays_license" / VarBuff,                    # ida.key file content
-    "hexrays_id" / Hex(Int32ul),                    # internal license_info
-    "watermark" / Hex(Int16ul),                     # internal license_info
+    "hexrays_id" / Hex(Bytes(6)),                   # 6 byte array representing IDAPRO*W LICENSE_ID
     "field_0x36" / IdaVarInt32,                     # always zero ?
 )
 
