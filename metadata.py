@@ -24,7 +24,7 @@ TypeInfo = con.GreedyBytes
 
 MetadataType = con.Enum(IdaVarInt32,
     MD_TYPE_INFO = 0x01,
-    MD_UNK2 = 0x02,
+    MD_VD_ELAPSED = 0x02,
     MD_FUNC_CMT = 0x03,
     MD_FUNC_REPCMT = 0x04,
     MD_INSN_CMT = 0x05,
@@ -43,7 +43,7 @@ Metadata_TypeInfo = con.Struct(
     "names" / con.GreedyRange(TypeInfoString),
 )
 
-Metadata_Unk2 = con.Struct(
+Metadata_VDElapsed = con.Struct(   #still no idea what this does yet
     "unk" / IdaVarInt64,
 )
 
@@ -169,7 +169,7 @@ Metadata_InsnOpreprs = InsnAnnotations(InsnOprepr)
 
 Metadata = con.Switch(con.this.code, {
     MetadataType.MD_TYPE_INFO: Metadata_TypeInfo,
-    MetadataType.MD_UNK2: Metadata_Unk2,
+    MetadataType.MD_VD_ELAPSED: Metadata_VDElapsed,
     MetadataType.MD_FUNC_CMT: Metadata_FuncCmt,
     MetadataType.MD_FUNC_REPCMT: Metadata_FuncCmt,
     MetadataType.MD_INSN_CMT: Metadata_InsnCmt,

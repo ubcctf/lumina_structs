@@ -8,7 +8,7 @@ from construct import (
     )
 
 from .basetypes import *
-from .metadata import MetadataPayload
+from .metadata import MetadataPayload, MetadataType
 
 IDA_PROTOCOL_VERSION = 2
 
@@ -82,6 +82,14 @@ RPC_TYPE = con.Enum(Byte,
     DEBUGCTL = 0x1f
 )
 
+ResultType = con.Enum(IdaVarInt32,                 # basically only NOT_FOUND, OK and ADDED are used
+	RES_BADPTN = 0xFFFFFFFD,
+	RES_NOT_FOUND = 0xFFFFFFFE,
+	RES_ERROR = 0xFFFFFFFF,
+	RES_OK = 0x0,
+	RES_ADDED = 0x1,
+)
+
 RpcMessage_FAIL = con.Struct(
     "status" / IdaVarInt32,
     "message" / CString("utf-8"),                   # null terminated string
@@ -100,18 +108,26 @@ RpcMessage_NOTIFY = con.Struct(
 )
 
 RpcMessage_PULL_MD  = con.Struct(
-    "flags" / IdaVarInt32,
-    "ukn_list" / ObjectList(IdaVarInt32),           # list of IdaVarInt32
+    "flags" / IdaVarInt32,                          # on IDA 7.5 / protocol 2, this is hardcoded to be 1 regardless of arch (the lumina pull_md routine in ida.dll expects lowermost bit to be 1 or else it will not apply fetched metadata, so it's certainly not type IDs either)
+    "types" / ObjectList(MetadataType),             # list of MetadataTypes; seems to always be empty normally? might be used for retrieving only specific metadata
     "funcInfos" / ObjectList(func_sig_t)            # list of func_sig_t
 )
 
 RpcMessage_PULL_MD_RESULT = con.Struct(
-    "found" / ObjectList(IdaVarInt32),              # list of boolean for each request in PULL_MD (1 if matching/found)
+    "found" / ObjectList(ResultType),               # list of ResultTypes for each request in PULL_MD
     "results" / ObjectList(func_info_t)             # list of func_info_t for each matching result
 )
 
+
+PushMdOpt = con.Enum(IdaVarInt32,
+	PUSH_OVERRIDE_IF_BETTER = 0x0,
+	PUSH_OVERRIDE = 0x1,
+	PUSH_DO_NOT_OVERRIDE = 0x2,
+	PUSH_MERGE = 0x3,
+)
+
 RpcMessage_PUSH_MD = con.Struct(
-    "field_0x10" / IdaVarInt32,
+    "type" / PushMdOpt,                             # for IDA 7.5 / protocol 2, this is hardcoded to be 0
     "idb_filepath" / CString("utf-8"),              # absolute file path of current idb
     "input_filepath" / CString("utf-8"),            # absolute file path of input file
     "input_md5" / Bytes(16),                        # input file md5
@@ -122,7 +138,7 @@ RpcMessage_PUSH_MD = con.Struct(
 
 
 RpcMessage_PUSH_MD_RESULT = con.Struct(
-    "resultsFlags" / ObjectList(IdaVarInt32),       # status for each function pushed
+    "resultsFlags" / ObjectList(ResultType),       # status for each function pushed
 )
 
 
