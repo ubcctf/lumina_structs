@@ -1,20 +1,72 @@
 from .basetypes import *
 
-class _SignedVarInt64Adapter(con.Adapter):
-    def _decode(self, obj, context, path):
-        res = obj - 1
-        if res >= (1 << 63):
-            res -= (1 << 64)
-        return res
+@singleton
+class TypeVarInt16(Construct):
+    r"""
+    construct adapter that handles (de)serialization of tinfo_t dt types  (see get_dt)
+    """
 
-    def _encode(self, obj, context, path):
-        obj = (obj + 1) & ((1 << 64) - 1)
+    def _parse(self, stream, context, path):
+        b = byte2int(stream_read(stream, 1, path))
+
+        if b & 0b10000000:  #we are in 2 bytes range
+            b = (b & 0b01111111) - 1 + 0x80 * (byte2int(stream_read(stream, 1, path)))
+            #its ""somewhat"" little endian
+
+        return b
+
+    def _build(self, obj, stream, context, path):
+        if not isinstance(obj, integertypes):
+            raise IntegerError("value is not an integer", path=path)
+        if obj < 0:
+            raise IntegerError("cannot build from negative number: %r" % (obj,), path=path)
+        if obj > 0x7FFE:
+            raise IntegerError("cannot build from number above short range: %r" % (obj,), path=path)
+
+        if obj > 0x7F:
+            stream.write(bytes([obj / 0x80, obj % 0x80 + 1]))
+
         return obj
 
-SignedVarInt64 = _SignedVarInt64Adapter(IdaVarInt64)
+@singleton
+class TypeArrayData(Construct):
+    r"""
+    construct adapter that handles (de)serialization of tinfo_t da types (see get_da)
+    40bit base / 40bit num_elems
+    """
+
+    def _parse(self, stream, context, path):
+        data = stream_read(stream, 9, path)
+
+        bb, bne = data[:4], data[5:]
+
+        bv = 0
+        for b in bb:
+            bv = bv << 7 | (b & 0b01111111)
+
+        nev = 0
+        for b in bne:
+            nev = nev << 7 | (b & 0b01111111)
+
+        return con.Container(base=(bv << 4) | (data[4] & 0xF), num_elems=(data[4] >> 4) | nev)
+
+    def _build(self, obj, stream, context, path):
+        if not isinstance(obj, integertypes):
+            raise IntegerError("value is not an integer", path=path)
+        if obj < 0:
+            raise IntegerError("cannot build from negative number: %r" % (obj,), path=path)
+        if obj > 0x7FFE:
+            raise IntegerError("cannot build from number above 0x7FFE: %r" % (obj,), path=path)
+
+        if obj > 0x7F:
+            stream.write(bytes([obj / 0x80, obj % 0x80]))
+
+        return obj
+
+
+
 TypeInfoStringLength = con.ExprAdapter(IdaVarInt32, con.obj_ - 1, con.obj_ + 1)
 TypeInfoString = con.PascalString(TypeInfoStringLength, "utf8")
-
 
 # IDs for common types
 CommonTypes = con.Enum(con.Byte,
@@ -137,6 +189,7 @@ PtrFlags = con.Enum(FLAGS_SIZE,
 
 # ref tf_array
 ArrayFlags = con.Enum(FLAGS_SIZE,
+    BTMT_NONE      = 0x0,      #(non-IDA) signifies no flags for array
     BTMT_NONBASED  = 0x1,      #< \code
                                # if set
                                #    array base==0
@@ -225,9 +278,20 @@ class TypeInfo(Construct):
     def _parse(self, stream, context, path):
         typedef = type_t.parse_stream(stream)
 
-        unparsed = con.GreedyBytes.parse_stream(stream)
+        data, rest = None, None
+        if int(typedef.basetype) >= 0xA:   #only process advanced types; basic types only have typedef
+            if typedef.basetype == BaseTypes.BT_ARRAY:
+                if typedef.flags == ArrayFlags.BTMT_NONBASED:
+                    base = 0
+                    size = TypeVarInt16.parse_stream(stream)
+                else:
+                    base, size = TypeArrayData.parse_stream(stream).values()
+                
+                data = con.Container(base=base, num_elems=size, type=TypeInfo.parse_stream(stream))
 
-        return con.Container(type=typedef, data=unparsed)
+            rest = con.GreedyBytes.parse_stream(stream)
+
+        return con.Container(type=typedef, data=data, unparsed=rest)
 
     def _build(self, obj, stream, context, path):
         return obj

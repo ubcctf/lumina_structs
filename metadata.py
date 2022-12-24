@@ -5,6 +5,18 @@ import io
 import copy
 from .tinfo import *
 
+class _SignedVarInt64Adapter(con.Adapter):
+    def _decode(self, obj, context, path):
+        res = obj - 1
+        if res >= (1 << 63):
+            res -= (1 << 64)
+        return res
+
+    def _encode(self, obj, context, path):
+        obj = (obj + 1) & ((1 << 64) - 1)
+        return obj
+SignedVarInt64 = _SignedVarInt64Adapter(IdaVarInt64)
+
 MetadataType = con.Enum(IdaVarInt32,
     MD_TYPE_INFO = 0x01,
     MD_VD_ELAPSED = 0x02,
