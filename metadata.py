@@ -3,24 +3,7 @@ from .basetypes import *
 from .util import AttrDict
 import io
 import copy
-
-class _SignedVarInt64Adapter(con.Adapter):
-    def _decode(self, obj, context, path):
-        res = obj - 1
-        if res >= (1 << 63):
-            res -= (1 << 64)
-        return res
-
-    def _encode(self, obj, context, path):
-        obj = (obj + 1) & ((1 << 64) - 1)
-        return obj
-
-SignedVarInt64 = _SignedVarInt64Adapter(IdaVarInt64)
-TypeInfoStringLength = con.ExprAdapter(IdaVarInt32, con.obj_ - 1, con.obj_ + 1)
-TypeInfoString = con.PascalString(TypeInfoStringLength, "utf8")
-# TODO: Implement a better TypeInfo parser and structures for the many, many little bits
-# (tinfo_deserialize is _complicated_)
-TypeInfo = con.GreedyBytes
+from .tinfo import *
 
 MetadataType = con.Enum(IdaVarInt32,
     MD_TYPE_INFO = 0x01,
