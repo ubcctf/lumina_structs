@@ -1,4 +1,5 @@
 from .basetypes import *
+from .util import AttrDict
 
 @singleton
 class TypeVarInt16(Construct):
@@ -15,6 +16,7 @@ class TypeVarInt16(Construct):
 
         return b - 1
 
+    #TODO test
     def _build(self, obj, stream, context, path):
         if not isinstance(obj, integertypes):
             raise IntegerError("value is not an integer", path=path)
@@ -24,7 +26,8 @@ class TypeVarInt16(Construct):
             raise IntegerError("cannot build from number above short range: %r" % (obj,), path=path)
 
         if obj > 0x7F:
-            stream.write(bytes([obj / 0x80, obj % 0x80 + 1]))
+            payload = bytes([obj / 0x80, obj % 0x80 + 1])
+            stream_write(stream, payload, len(payload), path)
 
         return obj
 
@@ -51,6 +54,7 @@ class TypeArrayData(Construct):
 
         return con.Container(base=(bv << 4) | (data[4] & 0xF), num_elems=(data[4] >> 4) | nev)
 
+    #TODO test
     def _build(self, obj, stream, context, path):
         if not isinstance(obj, integertypes):
             raise IntegerError("value is not an integer", path=path)
@@ -59,9 +63,21 @@ class TypeArrayData(Construct):
         if obj > 0x7FFE:
             raise IntegerError("cannot build from number above 0x7FFE: %r" % (obj,), path=path)
 
-        if obj > 0x7F:
-            stream.write(bytes([obj / 0x80, obj % 0x80]))
+        if type(obj) == dict:
+            obj = AttrDict(obj)
 
+        bv, nev = obj.base, obj.num_elems
+        bb, bne = [], []
+
+        while bv:
+            bb.append(bv & 0b01111111)
+            bv = bv >> 7
+
+        while nev:
+            bne.append(nev & 0b01111111)
+            nev = nev >> 7
+
+        stream_write(stream, bb[:4] + bytes([bb[5] & 0xF | bne << 4]) + bne[1:], 9, path)
         return obj
 
 
@@ -113,9 +129,14 @@ CommonTypes = con.Enum(con.Byte,
 
 
 # ref tf_mask
-TYPE_SIZE  = con.BitsInteger(4)   #TYPE_BASE_MASK  = 0x0F
-FLAGS_SIZE = con.BitsInteger(2)   #TYPE_FLAGS_MASK = 0x30
-MOD_SIZE   = con.BitsInteger(2)   #TYPE_MODIF_MASK = 0xC0
+TYPE_SIZE  = con.BitsInteger(4)   
+TYPE_BASE_MASK  = 0x0F
+
+FLAGS_SIZE = con.BitsInteger(2)   
+TYPE_FLAGS_MASK = 0x30
+
+MOD_SIZE   = con.BitsInteger(2)   
+TYPE_MODIF_MASK = 0xC0
 
 
 # ref tf
@@ -339,16 +360,30 @@ class TypeInfo(Construct):
     construct adapter that handles (de)serialization of tinfo_t
     """
 
-    #TODO figure out whether its true that sdacl has similar format to tah
-
-    def check_tah(self, stream, type):
+    #sdacl's check routine should be exactly the same as tah
+    #it's very likely that cross-disasm support can be implemented without the full feature set like tah/sdacl so the build counterpart of this is probably not gonna be implemented
+    #but if it will be, then this method should move to a separate construct class
+    #TODO test implementation (all these code is from translating pure reversed code so take it with a huge grain of salt lmao)
+    def check_tah_or_sdacl(self, stream, type, path):
         byte = stream.read(1)   #can't peek with all streams, implement it the dumb way instead
         if byte:   #do something only when we read something
-            if byte[0] == TAH_BYTE:
-                #TODO verify if this is what we expect to parse (i cant tell if im supposed to read it like da but big endian or not)
-                return AttrMapping.parse_stream(stream)
+            if byte[0] == TAH_BYTE or (((byte[0] & ~TYPE_FLAGS_MASK) ^ TYPE_MODIF_MASK) <= int(BaseTypes.BT_VOID)):   #is TAH or SDACL headers
+                sdacl_variable_bits = (byte[0] & 1 | (byte[0] >> 3) & 6)
+
+                val = 0
+                if bytes[0] == TAH_BYTE or sdacl_variable_bits == 0b111:  
+                    bit = 0
+                    #assumes this is a valid serialization of tah bytes, otherwise probably returns garbage (checks IDA implemented is not implemented here)
+                    while (b:=stream_read(stream, 1, path)) & 0b10000000 == 0:    #read it similar to da, but little endian and with variable size
+                        val |= (b & 0x7F) << bit
+                        bit += 7
+                else:  #not new headers, handle it the legacy way(?) and treat the variable bits as the value directly
+                    val = sdacl_variable_bits + 1
+                
+                #TODO see if the val is actually of TA_SIZE (should be coz `#define TAH_ALL         0x01F0  ///< all defined bits`)
+                return AttrMapping.parse(val.to_bytes(TA_SIZE.sizeof(), byteorder='little'))
             else:
-                #likely not TAH, reset file pointer and leave
+                #likely not TAH or SDACL, reset file pointer and leave
                 stream.seek(stream.tell()-1)
         return None
 
@@ -358,12 +393,13 @@ class TypeInfo(Construct):
         data, rest, tah = None, b'', None
         if int(typedef.basetype) > int(BaseTypes.BT_FLOAT):  #only process advanced types; basic types have no special logic aside from optional tah
             if typedef.basetype == BaseTypes.BT_PTR:
+                #TODO check whether the size is actually a normal byte (i highly doubt it - it's probably db or sth since it has to avoid null bytes but docs doesnt specify, nor does the deserialization routine in IDA do anything special from copying the byte only)
                 size = stream_read(stream, 1, path)  #even if we dont have size we must still have at least 1 byte left
                 if typedef.flags != PtrFlags.BTMT_CLOSURE: #if not closure theres no ptr size
                     stream.seek(stream.tell()-1)
                     size = None
 
-                tah = self.check_tah(stream, typedef.basetype)
+                tah = self.check_tah_or_sdacl(stream, typedef.basetype, path)
 
                 #if closure and size == RESERVED_BYTE, implicitly expects the parsed tinfo is of BT_FUNC, and size is ignored
                 data = con.Container(ptrsize=size, type=TypeInfo.parse_stream(stream))
@@ -375,7 +411,7 @@ class TypeInfo(Construct):
                 else:
                     base, size = TypeArrayData.parse_stream(stream).values()
                 
-                tah = self.check_tah(stream, typedef.basetype)
+                tah = self.check_tah_or_sdacl(stream, typedef.basetype, path)
                 
                 data = con.Container(base=base, num_elems=size, type=TypeInfo.parse_stream(stream))
 
@@ -385,9 +421,9 @@ class TypeInfo(Construct):
             rest += con.GreedyBytes.parse_stream(stream)
 
         else: #all basic types may be followed by [tah-typeattrs]
-            tah = self.check_tah(stream, typedef.basetype)   
+            tah = self.check_tah_or_sdacl(stream, typedef.basetype, path)   
 
-        return con.Container(typedef=typedef, attr=tah, data=data, unparsed=rest)
+        return con.Container(typedef=typedef, typeattr=tah, data=data, unparsed=rest)
 
     def _build(self, obj, stream, context, path):
         return obj
