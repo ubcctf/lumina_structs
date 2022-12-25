@@ -9,11 +9,11 @@ class TypeVarInt16(Construct):
     def _parse(self, stream, context, path):
         b = byte2int(stream_read(stream, 1, path))
 
-        if b & 0b10000000:  #we are in 2 bytes range
-            b = (b & 0b01111111) - 1 + 0x80 * (byte2int(stream_read(stream, 1, path)))
+        if b & 0b10000000:  #we are in 2 bytes range   
+            b = (b & 0b01111111) + stream_read(stream, 1, path)[0] << 7
             #its ""somewhat"" little endian
 
-        return b
+        return b - 1
 
     def _build(self, obj, stream, context, path):
         if not isinstance(obj, integertypes):
@@ -40,6 +40,7 @@ class TypeArrayData(Construct):
 
         bb, bne = data[:4], data[5:]
 
+        #similar to big endian?
         bv = 0
         for b in bb:
             bv = bv << 7 | (b & 0b01111111)
@@ -67,6 +68,12 @@ class TypeArrayData(Construct):
 
 TypeInfoStringLength = con.ExprAdapter(IdaVarInt32, con.obj_ - 1, con.obj_ + 1)
 TypeInfoString = con.PascalString(TypeInfoStringLength, "utf8")
+
+RESERVED_BYTE = 0xFF   #multipurpose(?)
+
+
+# Common Types
+
 
 # IDs for common types
 CommonTypes = con.Enum(con.Byte,
@@ -100,6 +107,10 @@ CommonTypes = con.Enum(con.Byte,
     STI_RTC_CHECK_8 = 0x1B,    #< int64 __fastcall(int64 x)
     STI_LAST = 0x1C,
 )
+
+
+# type_t Definitions
+
 
 # ref tf_mask
 TYPE_SIZE  = con.BitsInteger(4)   #TYPE_BASE_MASK  = 0x0F
@@ -253,6 +264,7 @@ FlagsMapping = con.Switch(lambda this: this.basetype, {
 
 
 # ref tf_modifiers
+# mutually exclusive; only applies for BT_ARRAY and BT_VOID?
 Modifiers = con.Enum(MOD_SIZE,
     BTM_NONE = 0x0,          #(non-IDA) signifies no modifiers
     BTM_CONST = 0x1,         #< const
@@ -269,29 +281,113 @@ type_t = con.Restreamed(con.Struct(
 #reorders the bitfields so FlagsMapping can parse correctly
 
 
+# TAH (type attribute header) definitions
+
+
+TA_SIZE = con.Bytes(2)         #type attribute bytes size (ref IDA 7.5)
+
+TAH_BYTE = 0xFE    #< type attribute header byte
+FAH_BYTE = 0xFF    #< function argument attribute header byte
+
+# ref tattr_udt (Type attributes for udts)  (udt = struct || union, complex type)
+UdtAttrFlags = con.FlagsEnum(TA_SIZE,
+    TAH_HASATTRS    = 0x0010,  #< has extended attributes
+    TAUDT_UNALIGNED = 0x0040,  #< struct: unaligned struct
+    TAUDT_MSSTRUCT  = 0x0020,  #< struct: gcc msstruct attribute
+    TAUDT_CPPOBJ    = 0x0080,  #< struct: a c++ object, not simple pod type
+    TAUDT_VFTABLE   = 0x0100,  #< struct: is virtual function table
+)
+
+# ref tattr_field (Type attributes for udt fields)
+UdtFieldAttrFlags = con.FlagsEnum(TA_SIZE,
+    TAH_HASATTRS    = 0x0010,  #< has extended attributes
+    TAFLD_BASECLASS = 0x0020,  #< field: do not include but inherit from the current field
+    TAFLD_UNALIGNED = 0x0040,  #< field: unaligned field
+    TAFLD_VIRTBASE  = 0x0080,  #< field: virtual base (not supported yet)
+    TAFLD_VFTABLE   = 0x0100,  #< field: ptr to virtual function table
+)
+
+# ref tattr_ptr (Type attributes for pointers)
+PtrAttrFlags = con.FlagsEnum(TA_SIZE,
+    TAH_HASATTRS    = 0x0010,  #< has extended attributes
+    TAPTR_PTR32     = 0x0020,  #< ptr: __ptr32
+    TAPTR_PTR64     = 0x0040,  #< ptr: __ptr64
+    TAPTR_RESTRICT  = 0x0060,  #< ptr: __restrict
+    TAPTR_SHIFTED   = 0x0080,  #< ptr: __shifted(parent_struct, delta)
+)
+
+# ref tattr_enum (Type attributes for enums)
+EnumAttrFlags = con.FlagsEnum(TA_SIZE,
+    TAH_HASATTRS    = 0x0010,  #< has extended attributes
+    TAENUM_64BIT    = 0x0020,  #< enum: store 64-bit values
+    TAENUM_UNSIGNED = 0x0040,  #< enum: unsigned
+    TAENUM_SIGNED   = 0x0080,  #< enum: signed
+)
+
+#i believe these are the only ones that are implemented right now, but basically all types' format aside from bitfields have optional tah-typeattrs fields
+AttrMapping = con.Switch(lambda this: this.type, {
+    BaseTypes.BT_PTR      : PtrAttrFlags,
+    BaseTypes.BT_COMPLEX  : UdtAttrFlags,        #expects BT_COMPLEX to mean struct | union only
+    ComplexFlags.BTMT_ENUM: EnumAttrFlags, 
+    None                  : UdtFieldAttrFlags,   #None signifies any types that are fields of a udt type
+}, default=TA_SIZE)
+
+
 @singleton
 class TypeInfo(Construct):
     r"""
     construct adapter that handles (de)serialization of tinfo_t
     """
 
+    #TODO figure out whether its true that sdacl has similar format to tah
+
+    def check_tah(self, stream, type):
+        byte = stream.read(1)   #can't peek with all streams, implement it the dumb way instead
+        if byte:   #do something only when we read something
+            if byte[0] == TAH_BYTE:
+                #TODO verify if this is what we expect to parse (i cant tell if im supposed to read it like da but big endian or not)
+                return AttrMapping.parse_stream(stream)
+            else:
+                #likely not TAH, reset file pointer and leave
+                stream.seek(stream.tell()-1)
+        return None
+
     def _parse(self, stream, context, path):
         typedef = type_t.parse_stream(stream)
 
-        data, rest = None, None
-        if int(typedef.basetype) >= 0xA:   #only process advanced types; basic types only have typedef
-            if typedef.basetype == BaseTypes.BT_ARRAY:
+        data, rest, tah = None, b'', None
+        if int(typedef.basetype) > int(BaseTypes.BT_FLOAT):  #only process advanced types; basic types have no special logic aside from optional tah
+            if typedef.basetype == BaseTypes.BT_PTR:
+                size = stream_read(stream, 1, path)  #even if we dont have size we must still have at least 1 byte left
+                if typedef.flags != PtrFlags.BTMT_CLOSURE: #if not closure theres no ptr size
+                    stream.seek(stream.tell()-1)
+                    size = None
+
+                tah = self.check_tah(stream, typedef.basetype)
+
+                #if closure and size == RESERVED_BYTE, implicitly expects the parsed tinfo is of BT_FUNC, and size is ignored
+                data = con.Container(ptrsize=size, type=TypeInfo.parse_stream(stream))
+                
+            elif typedef.basetype == BaseTypes.BT_ARRAY:
                 if typedef.flags == ArrayFlags.BTMT_NONBASED:
                     base = 0
                     size = TypeVarInt16.parse_stream(stream)
                 else:
                     base, size = TypeArrayData.parse_stream(stream).values()
                 
+                tah = self.check_tah(stream, typedef.basetype)
+                
                 data = con.Container(base=base, num_elems=size, type=TypeInfo.parse_stream(stream))
 
-            rest = con.GreedyBytes.parse_stream(stream)
+            elif typedef.basetype == BaseTypes.BT_FUNC:
+                pass
 
-        return con.Container(type=typedef, data=data, unparsed=rest)
+            rest += con.GreedyBytes.parse_stream(stream)
+
+        else: #all basic types may be followed by [tah-typeattrs]
+            tah = self.check_tah(stream, typedef.basetype)   
+
+        return con.Container(typedef=typedef, attr=tah, data=data, unparsed=rest)
 
     def _build(self, obj, stream, context, path):
         return obj
