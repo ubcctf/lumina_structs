@@ -81,9 +81,8 @@ class TypeArrayData(Construct):
         return obj
 
 
-
-TypeInfoStringLength = con.ExprAdapter(IdaVarInt32, con.obj_ - 1, con.obj_ + 1)
-TypeInfoString = con.PascalString(TypeInfoStringLength, "utf8")
+# ref p_string
+TypeInfoString = con.PascalString(TypeVarInt16, "utf8")
 
 RESERVED_BYTE = 0xFF   #multipurpose(?)
 
@@ -380,8 +379,18 @@ class TypeInfo(Construct):
                 else:  #not new headers, handle it the legacy way(?) and treat the variable bits as the value directly
                     val = sdacl_variable_bits + 1
                 
-                #TODO see if the val is actually of TA_SIZE (should be coz `#define TAH_ALL         0x01F0  ///< all defined bits`)
-                return AttrMapping.parse(val.to_bytes(TA_SIZE.sizeof(), byteorder='little'))
+                attrs = []
+                if val & 0x10:   #validity check? is val actually just used for this only????
+                    n = TypeVarInt16.parse_stream(stream)
+                    
+                    for _ in range(n):
+                        name = TypeInfoString.parse_stream(stream)
+                        #TODO logic on 0xAE/0xAC/0xFD checking? probably not
+                        #TODO figure out how this maps to the AttrMapping flags
+                        data = stream_read(stream, TypeVarInt16.parse_stream(stream), path)
+                        attrs.append(con.Container(name=name, data=data))
+
+                return con.ListContainer(attrs)
             else:
                 #likely not TAH or SDACL, reset file pointer and leave
                 stream.seek(stream.tell()-1)
