@@ -1,8 +1,9 @@
 from .basetypes import *
 from .util import AttrDict
+import math
 
 @singleton
-class TypeVarInt16(Construct):
+class TypeVarInt15(Construct):
     r"""
     construct adapter that handles (de)serialization of tinfo_t dt types  (see get_dt)
     """
@@ -11,7 +12,7 @@ class TypeVarInt16(Construct):
         b = byte2int(stream_read(stream, 1, path))
 
         if b & 0b10000000:  #we are in 2 bytes range   
-            b = (b & 0b01111111) + stream_read(stream, 1, path)[0] << 7
+            b = (b & 0b01111111) + (stream_read(stream, 1, path)[0] << 7)
             #its ""somewhat"" little endian
 
         return b - 1
@@ -29,6 +30,54 @@ class TypeVarInt16(Construct):
             payload = bytes([obj / 0x80, obj % 0x80 + 1])
             stream_write(stream, payload, len(payload), path)
 
+        return obj
+
+@singleton
+class TypeVarInt32(Construct):
+    r"""
+    construct adapter that handles (de)serialization of tinfo_t de types (see get_de)
+    40bit base / 40bit num_elems
+    """
+
+    def _parse(self, stream, context, path):
+        val = 0
+        while True:
+            curr = stream_read(stream, 1, path)[0]
+            if curr & 0b10000000:
+                val = val << 7 | curr & 0b01111111
+            else:   #last byte has 0b01000000
+                val = val << 6 | curr & 0b00111111
+                break
+
+        return val
+
+    #TODO test
+    def _build(self, obj, stream, context, path):
+        if not isinstance(obj, integertypes):
+            raise IntegerError("value is not an integer", path=path)
+        if obj < 0:
+            raise IntegerError("cannot build from negative number: %r" % (obj,), path=path)
+        if obj > 0xFFFFFFFF:
+            raise IntegerError("cannot build from number above 32 bit: %r" % (obj,), path=path)
+
+        b = []
+        cascade = False   #once the highest bit location has been found we dont care about whether the lower bits are zero or not - we always build
+        if obj >> 27:
+            b.append(((obj >> 27) & 0b01111111) | 0b10000000)
+            cascade = True
+        if cascade or obj >> 20:
+            b.append(((obj >> 20) & 0b01111111) | 0b10000000)
+            cascade = True
+        if cascade or obj >> 13:
+            b.append(((obj >> 13) & 0b01111111) | 0b10000000)
+            cascade = True
+        if cascade or obj >> 6:
+            b.append(((obj >> 6) & 0b01111111) | 0b10000000)
+
+        #always craft last byte
+        b.append((obj & 0b00111111) | 0b01000000)
+
+        stream_write(stream, bytes(b), len(b), path)
         return obj
 
 @singleton
@@ -82,7 +131,7 @@ class TypeArrayData(Construct):
 
 
 # ref p_string
-TypeInfoString = con.PascalString(TypeVarInt16, "utf8")
+TypeInfoString = con.PascalString(TypeVarInt15, "utf8")
 
 RESERVED_BYTE = 0xFF   #multipurpose(?)
 
@@ -300,18 +349,45 @@ type_t = con.Restreamed(con.Struct(
 , lambda data: con.bits2bytes(data[:2]+data[2:4]+data[:4]), 8, 1)  #we know type_t is 1 byte, so no need for a lambda
 #reorders the bitfields so FlagsMapping can parse correctly
 
+# Enum flags definitions
+OutputStyle = con.Enum(con.BitsInteger(2),
+    BTE_HEX  = 0b00,        #< hex
+    BTE_CHAR = 0b01,        #< char or hex
+    BTE_SDEC = 0b10,        #< signed decimal
+    BTE_UDEC = 0b11,        #< unsigned decimal
+)
+
+bte_t = con.BitStruct(
+    "always" / con.ExprValidator(con.Flag, lambda obj,_: obj),        #< this bit MUST be present (failfast)
+    "style" / OutputStyle,                                            #< output style mask
+    "bitfield" / con.Flag,                                            #< 'subarrays'. In this case ANY record
+                                                                      #< has the following format:
+                                                                      #<   - 'de' mask (has name)
+                                                                      #<   - 'dt' cnt
+                                                                      #<   - cnt records of 'de' values
+                                                                      #<      (cnt CAN be 0)
+                                                                      #< \note delta for ALL subsegment is ONE
+    "reserved" / con.ExprValidator(con.Flag, lambda obj,_: not obj),  #< must be 0, in order to distinguish
+                                                                      #< from a tah-byte
+    "size" / con.ExprAdapter(con.BitsInteger(3),                      #< storage size.
+                                lambda n,_: 1 << (n-1) if n else -1,  #<   - if == 0 then inf_get_cc_size_e()            
+                                lambda n,_: int(math.log(n,2)) + 1),  #<   - else 1 << (n -1) = 1,2,4...64
+                                #-1 sigifies default (cc_size_e)
+)
+
 
 # TAH (type attribute header) definitions
 
 
-TA_SIZE = con.Bytes(2)         #type attribute bytes size (ref IDA 7.5)
+TAFLAGS_SIZE = con.BytesInteger(2)         #type attribute flags size (ref IDA 7.5)
 
-TAH_BYTE = 0xFE    #< type attribute header byte
-FAH_BYTE = 0xFF    #< function argument attribute header byte
+TAH_BYTE = 0xFE                #< type attribute header byte
+FAH_BYTE = 0xFF                #< function argument attribute header byte
+
+TAH_HASATTRS = 0x0010          #< has extended attributes
 
 # ref tattr_udt (Type attributes for udts)  (udt = struct || union, complex type)
-UdtAttrFlags = con.FlagsEnum(TA_SIZE,
-    TAH_HASATTRS    = 0x0010,  #< has extended attributes
+UdtAttrFlags = con.FlagsEnum(TAFLAGS_SIZE,
     TAUDT_UNALIGNED = 0x0040,  #< struct: unaligned struct
     TAUDT_MSSTRUCT  = 0x0020,  #< struct: gcc msstruct attribute
     TAUDT_CPPOBJ    = 0x0080,  #< struct: a c++ object, not simple pod type
@@ -319,8 +395,7 @@ UdtAttrFlags = con.FlagsEnum(TA_SIZE,
 )
 
 # ref tattr_field (Type attributes for udt fields)
-UdtFieldAttrFlags = con.FlagsEnum(TA_SIZE,
-    TAH_HASATTRS    = 0x0010,  #< has extended attributes
+UdtFieldAttrFlags = con.FlagsEnum(TAFLAGS_SIZE,
     TAFLD_BASECLASS = 0x0020,  #< field: do not include but inherit from the current field
     TAFLD_UNALIGNED = 0x0040,  #< field: unaligned field
     TAFLD_VIRTBASE  = 0x0080,  #< field: virtual base (not supported yet)
@@ -328,8 +403,7 @@ UdtFieldAttrFlags = con.FlagsEnum(TA_SIZE,
 )
 
 # ref tattr_ptr (Type attributes for pointers)
-PtrAttrFlags = con.FlagsEnum(TA_SIZE,
-    TAH_HASATTRS    = 0x0010,  #< has extended attributes
+PtrAttrFlags = con.FlagsEnum(TAFLAGS_SIZE,
     TAPTR_PTR32     = 0x0020,  #< ptr: __ptr32
     TAPTR_PTR64     = 0x0040,  #< ptr: __ptr64
     TAPTR_RESTRICT  = 0x0060,  #< ptr: __restrict
@@ -337,8 +411,7 @@ PtrAttrFlags = con.FlagsEnum(TA_SIZE,
 )
 
 # ref tattr_enum (Type attributes for enums)
-EnumAttrFlags = con.FlagsEnum(TA_SIZE,
-    TAH_HASATTRS    = 0x0010,  #< has extended attributes
+EnumAttrFlags = con.FlagsEnum(TAFLAGS_SIZE,
     TAENUM_64BIT    = 0x0020,  #< enum: store 64-bit values
     TAENUM_UNSIGNED = 0x0040,  #< enum: unsigned
     TAENUM_SIGNED   = 0x0080,  #< enum: signed
@@ -349,8 +422,8 @@ AttrMapping = con.Switch(lambda this: this.type, {
     BaseTypes.BT_PTR      : PtrAttrFlags,
     BaseTypes.BT_COMPLEX  : UdtAttrFlags,        #expects BT_COMPLEX to mean struct | union only
     ComplexFlags.BTMT_ENUM: EnumAttrFlags, 
-    None                  : UdtFieldAttrFlags,   #None signifies any types that are fields of a udt type
-}, default=TA_SIZE)
+    None                  : UdtFieldAttrFlags,   #None signifies any types that are fields of a udt type (currently unused by this parser)
+}, default=TAFLAGS_SIZE)
 
 
 @singleton
@@ -362,35 +435,39 @@ class TypeInfo(Construct):
     #sdacl's check routine should be exactly the same as tah
     #it's very likely that cross-disasm support can be implemented without the full feature set like tah/sdacl so the build counterpart of this is probably not gonna be implemented
     #but if it will be, then this method should move to a separate construct class
-    #TODO test implementation (all these code is from translating pure reversed code so take it with a huge grain of salt lmao)
-    def check_tah_or_sdacl(self, stream, type, path):
+    #TODO test sdacl and hasattrs (all these code is from translating pure reversed code so take it with a huge grain of salt lmao)
+    def check_tah_or_sdacl(self, stream, type, path, sdacl = False):
         byte = stream.read(1)   #can't peek with all streams, implement it the dumb way instead
         if byte:   #do something only when we read something
-            if byte[0] == TAH_BYTE or (((byte[0] & ~TYPE_FLAGS_MASK) ^ TYPE_MODIF_MASK) <= int(BaseTypes.BT_VOID)):   #is TAH or SDACL headers
+            #sdacl can clash with other bytes - only parse as sdacl when we expect it (aka sdacl is True)
+            if byte[0] == TAH_BYTE or (sdacl and (((byte[0] & ~TYPE_FLAGS_MASK) ^ TYPE_MODIF_MASK) <= int(BaseTypes.BT_VOID))):   #is TAH or SDACL headers
                 sdacl_variable_bits = (byte[0] & 1 | (byte[0] >> 3) & 6)
 
                 val = 0
-                if bytes[0] == TAH_BYTE or sdacl_variable_bits == 0b111:  
+                if byte[0] == TAH_BYTE or sdacl_variable_bits == 0b111:
                     bit = 0
                     #assumes this is a valid serialization of tah bytes, otherwise probably returns garbage (checks IDA implemented is not implemented here)
-                    while (b:=stream_read(stream, 1, path)) & 0b10000000 == 0:    #read it similar to da, but little endian and with variable size
-                        val |= (b & 0x7F) << bit
+                    while True:    #read it similar to da, but little endian and with variable size
+                        b = stream_read(stream, 1, path)[0]
+                        val |= (b & 0b01111111) << bit
+                        if b & 0b10000000 == 0:
+                            break
                         bit += 7
                 else:  #not new headers, handle it the legacy way(?) and treat the variable bits as the value directly
                     val = sdacl_variable_bits + 1
-                
+
                 attrs = []
-                if val & 0x10:   #validity check? is val actually just used for this only????
-                    n = TypeVarInt16.parse_stream(stream)
+                if val & TAH_HASATTRS:  #has attributes, otherwise only has flags
+                    n = TypeVarInt15.parse_stream(stream)
                     
                     for _ in range(n):
                         name = TypeInfoString.parse_stream(stream)
                         #TODO logic on 0xAE/0xAC/0xFD checking? probably not
                         #TODO figure out how this maps to the AttrMapping flags
-                        data = stream_read(stream, TypeVarInt16.parse_stream(stream), path)
+                        data = stream_read(stream, TypeVarInt15.parse_stream(stream), path)
                         attrs.append(con.Container(name=name, data=data))
 
-                return con.ListContainer(attrs)
+                return con.Container(flags=AttrMapping.parse(val.to_bytes(TAFLAGS_SIZE.sizeof(), byteorder='big'), type=type), attrs=con.ListContainer(attrs))
             else:
                 #likely not TAH or SDACL, reset file pointer and leave
                 stream.seek(stream.tell()-1)
@@ -402,7 +479,8 @@ class TypeInfo(Construct):
         data, rest, tah = None, b'', None
         if int(typedef.basetype) > int(BaseTypes.BT_FLOAT):  #only process advanced types; basic types have no special logic aside from optional tah
             if typedef.basetype == BaseTypes.BT_PTR:
-                #TODO check whether the size is actually a normal byte (i highly doubt it - it's probably db or sth since it has to avoid null bytes but docs doesnt specify, nor does the deserialization routine in IDA do anything special from copying the byte only)
+                #TODO it is db ([db sizeof(ptr)]; [tah-typeattrs]; type_t...)
+                #TODO test closure somehow
                 size = stream_read(stream, 1, path)  #even if we dont have size we must still have at least 1 byte left
                 if typedef.flags != PtrFlags.BTMT_CLOSURE: #if not closure theres no ptr size
                     stream.seek(stream.tell()-1)
@@ -416,7 +494,7 @@ class TypeInfo(Construct):
             elif typedef.basetype == BaseTypes.BT_ARRAY:
                 if typedef.flags == ArrayFlags.BTMT_NONBASED:
                     base = 0
-                    size = TypeVarInt16.parse_stream(stream)
+                    size = TypeVarInt15.parse_stream(stream)
                 else:
                     base, size = TypeArrayData.parse_stream(stream).values()
                 
@@ -425,9 +503,80 @@ class TypeInfo(Construct):
                 data = con.Container(base=base, num_elems=size, type=TypeInfo.parse_stream(stream))
 
             elif typedef.basetype == BaseTypes.BT_FUNC:
+                #TODO impl
+                rest += con.GreedyBytes.parse_stream(stream)
                 pass
 
-            rest += con.GreedyBytes.parse_stream(stream)
+            elif typedef.basetype == BaseTypes.BT_COMPLEX:
+                if typedef.flags == ComplexFlags.BTMT_TYPEDEF:
+                    #only useful complex type wrt Lumina - see comment below
+                    data = con.Container(name=TypeInfoString.parse_stream(stream))
+                else:
+                    #IDA does not push typerefs verbatim - instead it represents it as a typedef with the ordinal string ('#' + set_de(ord)) as name
+                    #Lumina (calc_func_metadata) always call replace_ordinal_typerefs before serialize_tinfo, so instead of the ordinal string it is replaced with the actual type name
+                    #to get the actual serialized type definition from the ordinal, something like get_numbered_type will have to be called, but they are never called in Lumina afaict
+                    #(which checks out since Lumina does not have any way to pass things like field names, but this also means that complex types never gets pushed unfortunately)
+                    #the best thing one can do when applying the info obtained from Lumina is probably to check whether the type name exists in the disasm database, and utilize it if the size matches nbytes; otherwise probably make an empty struct of size nbytes and let ppl fill it in later
+                    #and the actual struct definitions themselves will likely have to come from exporting local types as a header file and parsing it in the other disassemblers manually
+
+                    n = TypeVarInt15.parse_stream(stream)
+                    if n == 0:  #treat the same as a typedef if there are no member fields
+                        data = con.Container(name=TypeInfoString.parse_stream(stream))
+                        tah = self.check_tah_or_sdacl(stream, typedef.basetype, path, True)  #sdacl
+                    else:
+                        if n == 0x7FFE:   #support high member count; this is technically defined separately for enum and struct & union, but should work the same here
+                            n = TypeVarInt32.parse_stream(stream)  #discard existing n from dt (idk why IDA chose such a wasteful method - i wouldve thought they would reuse the 0x7FFE value)
+
+                        #sdacl for structs & unions; tah for enums
+                        #(technically defined separately again at the end of each respective case, but IDA does it at the same time internally just like we are doing right now)
+                        tah = self.check_tah_or_sdacl(stream, typedef.basetype if typedef.flags != ComplexFlags.BTMT_ENUM else ComplexFlags.BTMT_ENUM, path, typedef.flags != ComplexFlags.BTMT_ENUM)
+
+                        if typedef.flags == ComplexFlags.BTMT_ENUM:
+                            #bte_t; list of de delta(s) OR blocks(bitfield?) of size n
+
+                            bte = bte_t.parse_stream(stream)
+
+                            if bte.bitfield:  #blocks (defined in BTE_BITFIELD)
+                                #TODO somehow test - it seems like IDA never carries the bitfield definitions forward from IDB format to TIL format so this never gets set
+                                vals = []
+                                for _ in range(n):
+                                    mask = TypeVarInt32.parse_stream(stream)
+                                    cnt = TypeVarInt15.parse_stream(stream)
+                                    subarr = con.ListContainer([TypeVarInt32.parse_stream(stream) for _ in range(cnt)])
+                                    vals.append(con.Container(mask=mask, cnt=cnt, subarr=subarr))  #subarr probably also have delta values
+                                data = con.Container(flags=bte, vals=con.ListContainer(vals))
+                            else:  #much easier: de delta(s) (delta is difference between each enum value)
+                                #TODO signedness (make TypeVarInt32 extend BytesInteger?)
+                                #delta can be negative (currently represented as unsigned 32bit value) if width is smaller than required to fit all values
+                                #TAENUM_64BIT is supported by mashing 2 de types (32bit each) into one value; width can be bigger than 8 bytes (64 bit), but values get truncated to 8 bytes anyway
+                                if tah and tah.flags.TAENUM_64BIT:
+                                    deltas = [TypeVarInt32.parse_stream(stream) | TypeVarInt32.parse_stream(stream) << 32 for _ in range(n)]
+                                else:
+                                    deltas = [TypeVarInt32.parse_stream(stream) for _ in range(n)]
+                                data = con.Container(flags=bte, deltas=con.ListContainer(deltas[::2] if tah and tah.flags.TAENUM_64BIT else deltas))
+
+                        else:   #struct & union
+                            # list of type_t; [sdacl-typeattrs]; of size mcnt (technically union doesn't have sdacl but we should be good to call check anyways since sdacl bytes should be distinct from all valid base type_ts)
+
+                            #align == -1 if use default align (processor specific; need additional logic in parsing.py (lumina-binja/lumina-ghidra))
+                            align = -1 if (alpow:=(n & 0x7)) == 0 else (1 << (alpow - 1))
+                            mcnt = n >> 3
+
+                            tah = self.check_tah_or_sdacl(stream, typedef.basetype, path, True)   #sdacl
+
+                            fields = []
+                            for _ in range(mcnt):
+                                tif = TypeInfo.parse_stream(stream)
+                                sdacl = self.check_tah_or_sdacl(stream, tif, path, True)   #each field has its own sdacl-typeattr if it's structs, see comment above
+                                fields.append(con.Container(type=tif, sdacl=sdacl))
+                            data=con.Container(align=align, fields=con.ListContainer(fields))
+
+            elif typedef.basetype == BaseTypes.BT_BITFIELD:
+                val = TypeVarInt15.parse_stream(stream)
+                data = con.Container(bitsize=val >> 1, unsigned=bool(val & 0b1)) #TODO abstract simple logic like these into construct?
+
+            else: #should never happen once everything is implemented - unparsed data due to unknown type
+                rest += con.GreedyBytes.parse_stream(stream)
 
         else: #all basic types may be followed by [tah-typeattrs]
             tah = self.check_tah_or_sdacl(stream, typedef.basetype, path)   
