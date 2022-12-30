@@ -349,7 +349,123 @@ type_t = con.Restreamed(con.Struct(
 , lambda data: con.bits2bytes(data[:2]+data[2:4]+data[:4]), 8, 1)  #we know type_t is 1 byte, so no need for a lambda
 #reorders the bitfields so FlagsMapping can parse correctly
 
+
+# Calling Convention definitions
+
+
+#ref CM_
+CM_SIZE = con.BitsInteger(2)    #const cm_t CM_MASK = 0x03;
+CM_M_SIZE = con.BitsInteger(2)  #const cm_t CM_M_MASK = 0x0C;
+CM_CC_SIZE = con.BitsInteger(4) #const cm_t CM_CC_MASK = 0xF0;
+
+#ref CM_ptr
+CallingPtrSize = con.Enum(CM_SIZE, 
+   CM_UNKNOWN   = 0x00,         #< unknown
+   CM_N8_F16    = 0x01,         #< if sizeof(int)<=2: near 1 byte, far 2 bytes
+                                #< if sizeof(int)>2: near 8 bytes, far 8 bytes
+   CM_N16_F32   = 0x02,         #< near 2 bytes, far 4 bytes
+   CM_N32_F48   = 0x03,         #< near 4 bytes, far 6 bytes
+)
+
+#ref CM_M_
+CallingModel = con.Enum(CM_M_SIZE,
+   CM_M_NN      = 0x00,         #< small:   code=near, data=near (or unknown if CM_UNKNOWN)
+   CM_M_FF      = 0x01,         #< large:   code=far, data=far
+   CM_M_NF      = 0x02,         #< compact: code=near, data=far
+   CM_M_FN      = 0x03,         #< medium:  code=far, data=near
+)
+
+#ref CM_CC_
+CallingConvention = con.Enum(CM_CC_SIZE, 
+   CM_CC_INVALID  = 0x00,       #< this value is invalid
+   CM_CC_UNKNOWN  = 0x01,       #< unknown calling convention
+   CM_CC_VOIDARG  = 0x02,       #< function without arguments
+                                #< if has other cc and argnum == 0,
+                                #< represent as f() - unknown list
+   CM_CC_CDECL    = 0x03,       #< stack
+   CM_CC_ELLIPSIS = 0x04,       #< cdecl + ellipsis
+   CM_CC_STDCALL  = 0x05,       #< stack, purged
+   CM_CC_PASCAL   = 0x06,       #< stack, purged, reverse order of args
+   CM_CC_FASTCALL = 0x07,       #< stack, purged (x86), first args are in regs (compiler-dependent)
+   CM_CC_THISCALL = 0x08,       #< stack, purged (x86), first arg is in reg (compiler-dependent)
+   CM_CC_MANUAL   = 0x09,       #< special case for compiler specific (not used)
+   CM_CC_SPOILED  = 0x0A,       #< This is NOT a cc! Mark of __spoil record
+                                #< the low nibble is count and after n {spoilreg_t}
+                                #< present real cm_t byte. if n == BFA_FUNC_MARKER,
+                                #< the next byte is the function attribute byte.
+   CM_CC_RESERVE4 = 0x0B,
+   CM_CC_RESERVE3 = 0x0C,
+   CM_CC_SPECIALE = 0x0D,       #< ::CM_CC_SPECIAL with ellipsis
+   CM_CC_SPECIALP = 0x0E,       #< Equal to ::CM_CC_SPECIAL, but with purged stack
+   CM_CC_SPECIAL  = 0x0F,       #< usercall: locations of all arguments
+                                #< and the return value are explicitly specified
+)
+
+cm_t = con.BitStruct(
+    'convention' / CallingConvention,
+    'model' / CallingModel,
+    'ptrsize' / CallingPtrSize,
+)
+
+
+#ref BFA_ Function attribute byte
+BFA_FUNC_MARKER     = 0x0F        #< This is NOT a cc! (used internally as a marker)
+
+BfaByte = con.FlagsEnum(con.Byte,
+    BFA_NORET           = 0x01,   #< __noreturn
+    BFA_PURE            = 0x02,   #< __pure
+    BFA_HIGH            = 0x04,   #< high level prototype (with possibly hidden args)
+    BFA_STATIC          = 0x08,   #< static
+    BFA_VIRTUAL         = 0x10,   #< virtual
+    BFA_FUNC_EXT_FORMAT = 0x80,   #< This is NOT a real attribute (used internally as marker for extended format)
+)
+
+#ref FTI_ Function type data property bits
+FtiFlags = con.FlagsEnum(con.BitsInteger(6),
+    FTI_SPOILED   = 0x0001,       #< information about spoiled registers is present
+    FTI_NORET     = 0x0002,       #< noreturn
+    FTI_PURE      = 0x0004,       #< __pure
+    FTI_HIGH      = 0x0008,       #< high level prototype (with possibly hidden args)
+    FTI_STATIC    = 0x0010,       #< static
+    FTI_VIRTUAL   = 0x0020,       #< virtual
+)
+
+#FTI_CALLTYPE  = 0x00C0,          #< mask for FTI_*CALL
+FtiCallType = con.FlagsEnum(con.BitsInteger(2),   #i think its mutually exclusive(?) but ill leave it as flags for now
+    FTI_DEFCALL   = 0x0000,       #<   default call
+    FTI_NEARCALL  = 0x0040,       #<   near call
+    FTI_FARCALL   = 0x0080,       #<   far call
+    FTI_INTCALL   = 0x00C0,       #<   interrupt call
+)
+
+#FTI_ALL       = 0x01FF,          #< all defined bits
+fti_vals = con.BitStruct(
+    con.Padding(7),               #(non-IDA) unnamed padding for the unused 0xFE bits in first byte
+    'arglocs' / con.Flag,         #< info about argument locations has been calculated (FTI_ARGLOCS = 0x100)
+                                  #< (stkargs and retloc too)
+    'calltype' / FtiCallType,
+    'flags' / FtiFlags,
+)
+
+#con.Bitwise does not read enough if the struct does not consume an amount divisible by 8 (integer division)
+#not to be directly used just like AttrMapping - should be bundled with get_de here
+
+
+#ref FAI_ Function argument property bits (funcarg_t::flags)
+FuncArgFlags = con.FlagsEnum(TypeVarInt32,
+    FAI_HIDDEN  = 0x0001,          #< hidden argument
+    FAI_RETPTR  = 0x0002,          #< pointer to return value. implies hidden
+    FAI_STRUCT  = 0x0004,          #< was initially a structure
+    FAI_ARRAY   = 0x0008,          #< was initially an array
+                                   #< see "__org_typedef" or "__org_arrdim" type attributes
+                                   #< to determine the original typ
+)
+
+
 # Enum flags definitions
+
+
+#ref tf_enum
 OutputStyle = con.Enum(con.BitsInteger(2),
     BTE_HEX  = 0b00,        #< hex
     BTE_CHAR = 0b01,        #< char or hex
@@ -370,7 +486,7 @@ bte_t = con.BitStruct(
     "reserved" / con.ExprValidator(con.Flag, lambda obj,_: not obj),  #< must be 0, in order to distinguish
                                                                       #< from a tah-byte
     "size" / con.ExprAdapter(con.BitsInteger(3),                      #< storage size.
-                                lambda n,_: 1 << (n-1) if n else -1,  #<   - if == 0 then inf_get_cc_size_e()            
+                                lambda n,_: 1 << (n-1) if n else -1,  #<   - if == 0 then inf_get_cc_size_e()
                                 lambda n,_: int(math.log(n,2)) + 1),  #<   - else 1 << (n -1) = 1,2,4...64
                                 #-1 sigifies default (cc_size_e)
 )
@@ -378,8 +494,8 @@ bte_t = con.BitStruct(
 
 # TAH (type attribute header) definitions
 
-
-TAFLAGS_SIZE = con.BytesInteger(2)         #type attribute flags size (ref IDA 7.5)
+#not to be directly used (it requires preprocessing of values - see check_tah_or_sdacl)
+TAFLAGS_SIZE = con.BytesInteger(2) #type attribute flags size (ref IDA 7.5, TAH_ALL = 0x01F0           #< all defined bits)
 
 TAH_BYTE = 0xFE                #< type attribute header byte
 FAH_BYTE = 0xFF                #< function argument attribute header byte
@@ -503,9 +619,72 @@ class TypeInfo(Construct):
                 data = con.Container(base=base, num_elems=size, type=TypeInfo.parse_stream(stream))
 
             elif typedef.basetype == BaseTypes.BT_FUNC:
-                #TODO impl
-                rest += con.GreedyBytes.parse_stream(stream)
-                pass
+                cm = cm_t.parse_stream(stream)
+
+                spoiled = None
+                if cm.convention == CallingConvention.CM_CC_SPOILED:  #not actually a cm_t yet, we need to handle spoiled regs
+                    #TODO figure out when this would be used in IDA and test (a large portion of this is again from pure reversed code)
+                    regsize = cm_t.build(cm)[0] & 0xF   #rebuild it into a byte to get the lower nibble
+
+                    bfa, ftiflags = None, None
+                    if regsize == BFA_FUNC_MARKER:
+                        bfa = BfaByte.parse_stream(stream)
+                        if bfa.BFA_FUNC_EXT_FORMAT:
+                            #we only care about the lower bits (flags)
+                            ftiflags = fti_vals.parse(TypeVarInt32.parse_stream(stream).to_bytes(fti_vals.sizeof(), byteorder='big')).flags
+                            
+                            regsize = TypeVarInt15.parse_stream(stream)
+                    
+                    #extract_spoiledreg - might wanna move it to a separate construct
+                    regs = []
+                    for _ in range(regsize):
+                        #reg numbering is architecture dependent unfortunately
+                        if (b:=stream_read(stream, 1, path)[0]) & 0b10000000:
+                            if b == 0xFF:   #probably for cases where the reg number is larger than 8 bit? again kinda wasteful tbh
+                                reg = TypeVarInt15.parse_stream(stream)
+                            else:
+                                reg = b & 0b01111111
+                            size = stream_read(stream, 1, path)[0]  #seems like they assume the size is != 0? considering their principle of not letting null bytes in tinfo
+                        else:    #smallest version - both in a single byte
+                            reg = (b & 0xF) - 1
+                            size = (b >> 4) + 1
+                        regs.append(con.Container(reg=reg, size=size))   #ref reg_info_t
+
+                    spoiled = con.Container(bfa=bfa, ftiflags=ftiflags, regs=con.ListContainer(regs))
+
+                tah = self.check_tah_or_sdacl(stream, typedef.basetype, path)
+
+                rettype = TypeInfo.parse_stream(stream)
+
+                argloc = None
+                check_argloc = cm.convention in [CallingConvention.CM_CC_SPECIAL, CallingConvention.CM_CC_SPECIALP, CallingConvention.CM_CC_SPECIALE]
+                if check_argloc and rettype.basetype != BaseTypes.BT_VOID:
+                    #TODO extract_argloc and test
+                    pass
+                
+                #empty list = void arg, None = unknown arg; otherwise container, with type = BT_UNK for ellipsis or actual arg type
+                params = []
+                if cm.convention != CallingConvention.CM_CC_VOIDARG:
+                    n = TypeVarInt15.parse_stream(stream)
+                    if not n:
+                        if cm.convention in [CallingConvention.CM_CC_ELLIPSIS, CallingConvention.CM_CC_SPECIALE]:
+                            #build BT_UNK to signify ellipsis
+                            params.append(con.Container(type=TypeInfo.parse('\0'), argloc=None, flags=None))
+                        else:
+                            params = None
+                    else:
+                        for _ in range(n):
+                            argtype = TypeInfo.parse_stream(stream)
+                            argargloc = None if check_argloc else None   #TODO extract_argloc
+                            if (b:=stream.read(1)) and b[0] == FAH_BYTE:   #don't use stream_read since it's optional
+                                #TODO test
+                                argflags = FuncArgFlags.parse_stream(stream)
+                            else:
+                                stream.seek(stream.tell()-1)   #reset since that is not actually a FAH byte
+                                argflags = None
+                            params.append(con.Container(type=argtype, argloc=argargloc, flags=argflags))
+
+                data = con.Container(spoiled=spoiled, cc=cm, rettype=rettype, argloc=argloc, params=con.ListContainer(params))
 
             elif typedef.basetype == BaseTypes.BT_COMPLEX:
                 if typedef.flags == ComplexFlags.BTMT_TYPEDEF:
@@ -543,7 +722,7 @@ class TypeInfo(Construct):
                                     mask = TypeVarInt32.parse_stream(stream)
                                     cnt = TypeVarInt15.parse_stream(stream)
                                     subarr = con.ListContainer([TypeVarInt32.parse_stream(stream) for _ in range(cnt)])
-                                    vals.append(con.Container(mask=mask, cnt=cnt, subarr=subarr))  #subarr probably also have delta values
+                                    vals.append(con.Container(mask=mask, cnt=cnt, subarr=subarr))  #subarr probably also have deltas as values
                                 data = con.Container(flags=bte, vals=con.ListContainer(vals))
                             else:  #much easier: de delta(s) (delta is difference between each enum value)
                                 #TODO signedness (make TypeVarInt32 extend BytesInteger?)
@@ -575,7 +754,7 @@ class TypeInfo(Construct):
                 val = TypeVarInt15.parse_stream(stream)
                 data = con.Container(bitsize=val >> 1, unsigned=bool(val & 0b1)) #TODO abstract simple logic like these into construct?
 
-            else: #should never happen once everything is implemented - unparsed data due to unknown type
+            else: #should never happen once everything is implemented - unparsed data due to unknown type (or BT_RESERVED)
                 rest += con.GreedyBytes.parse_stream(stream)
 
         else: #all basic types may be followed by [tah-typeattrs]
