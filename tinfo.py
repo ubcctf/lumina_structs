@@ -563,6 +563,10 @@ class ArgLoc(Construct):
     #only guaranteed field to exist is type - please check type before accessing fields
     def _parse(self, stream, context, path):
         #TODO test more thoroughly, esp the more complicated arglocs (pure reversed code again woohoo)
+
+        #default case - is_badloc() == true
+        data = con.Container(type=ArglocType.ALOC_NONE)
+        
         if (b:=stream_read(stream, 1, path)[0]) != 0xFF:
             #simple serializations (basically most cases in Lumina)
             val = (b & 0x7F) - 1
@@ -584,9 +588,60 @@ class ArgLoc(Construct):
                     reginfo = con.Container(reg=val, off=0),
                 )
         else:
-            #TODO implement and test complex argloc serializations
-            pass
+            #TODO test complex argloc serializations
+            #a LOT of assumptions were made wrt value consumption - somehow all of the de/dt deserializations are inlined here, so these assumptions might be wrong
+            val = TypeVarInt15.parse_stream(stream)
+            
+            if val & 0b1000000:   #0x40, probably some sort of internal flag
+                #special case - seems to be just handling ALOC_DIST
+                n = val & ~0b1000000
+                parts = []
+                for _ in range(n):
+                    parts.append(con.Container(
+                        argloc = ArgLoc.parse_stream(stream),
+                        off = TypeVarInt15.parse_stream(stream),
+                        size = TypeVarInt15.parse_stream(stream),
+                    ))
+                    
+                data = con.Container(
+                    type = ArglocType.DIST,
+                    parts = con.ListContainer(parts)
+                )
+            else:
+                #pther serializations (honestly a lot of these are overlapping, it's just that the namings are different)
+                type = val + 1   #for some reason it has to be +1'd (aka directly using the byte value instead) - makes sense since all types fit in a byte normally but still weird
+                if type == ArglocType.ALOC_STACK.intvalue:
+                    #seems like even though sval_t -> adiff_t -> dependent on arch size when it comes to argloc_t it is always 64 bit
+                    data = con.Container(
+                        type = ArglocType.ALOC_STACK,
+                        stkoff = TypeVarInt32.parse_stream(stream) | (TypeVarInt32.parse_stream(stream) << 32)
+                    )
+                #somehow ALOC_DIST is missing in this context? it just returns without setting anything, not even signifying a fail (ret == 1)
+                #ALOC_DIST probably needs to be with the special case instead, and the good just means nothing broke (but argloc is still bad (ALOC_NONE == 0, which is default value after C alloc))
+                elif type in [ArglocType.ALOC_REG1.intvalue, ArglocType.ALOC_REG2.intvalue]:
+                    pair = type == ArglocType.ALOC_REG2.intvalue
+                    data = con.Container(
+                        type = ArglocType.ALOC_REG2 if pair else ArglocType.ALOC_REG1,
+                        reginfo = con.Container(**{                #different (conditional) naming for keywords, so we do some funny business instead
+                            "reg1" if pair else "reg" : TypeVarInt15.parse_stream(stream),
+                            "reg2" if pair else "off" : TypeVarInt15.parse_stream(stream)
+                        })
+                    )
+                elif type == ArglocType.ALOC_RREL.intvalue:
+                    data = con.Container(
+                        type = ArglocType.ALOC_RREL,
+                        rrel = con.Container(
+                            reg = TypeVarInt15.parse_stream(stream),
+                            off = TypeVarInt32.parse_stream(stream) | (TypeVarInt32.parse_stream(stream) << 32)
+                        )
+                    )
+                elif type == ArglocType.ALOC_STATIC.intvalue:
+                    data = con.Container(
+                        type = ArglocType.ALOC_STATIC,
+                        ea = TypeVarInt32.parse_stream(stream) | (TypeVarInt32.parse_stream(stream) << 32)
+                    )
 
+        #i dont think extract_argloc supports ALOC_CUSTOM
         return data
 
     def _build(self, obj, stream, context, path):
@@ -608,7 +663,7 @@ class TypeInfo(Construct):
         byte = stream.read(1)   #can't peek with all streams, implement it the dumb way instead
         if byte:   #do something only when we read something
             #sdacl can clash with other bytes - only parse as sdacl when we expect it (aka sdacl is True)
-            if byte[0] == TAH_BYTE or (sdacl and (((byte[0] & ~TYPE_FLAGS_MASK) ^ TYPE_MODIF_MASK) <= int(BaseTypes.BT_VOID))):   #is TAH or SDACL headers
+            if byte[0] == TAH_BYTE or (sdacl and (((byte[0] & ~TYPE_FLAGS_MASK) ^ TYPE_MODIF_MASK) <= BaseTypes.BT_VOID.intvalue)):   #is TAH or SDACL headers
                 sdacl_variable_bits = (byte[0] & 1 | (byte[0] >> 3) & 6)
 
                 val = 0
@@ -643,7 +698,7 @@ class TypeInfo(Construct):
 
     #it's likely that we won't ever use ordinal outside of parsing (or even in Lumina at all since replace_ordinal_typerefs is always called) so not making another construct for this
     def parse_ordinal_or_name(self, stream, path):
-        size = TypeVarInt15.parse_stream(stream)  #not used, but we need to read it like a string anyway
+        size = TypeVarInt15.parse_stream(stream)  #not used in ordinals, but we need to read it like a string anyway
         byte = stream.read(1)   #can't peek with all streams, implement it the dumb way instead
         if byte:   #do something only when we read something
             print(byte)
@@ -651,14 +706,14 @@ class TypeInfo(Construct):
                 return '#' + str(TypeVarInt32.parse_stream(stream))
             else:
                 stream.seek(stream.tell()-1)  #go back since it's not an ordinal
-                return stream_read(stream, size, path)  #it's easier to just do this instead of using TypeInfoString since size is already consumed
+                return stream_read(stream, size, path).decode()  #it's easier to just do this instead of using TypeInfoString since size is already consumed
 
 
     def _parse(self, stream, context, path):
         typedef = type_t.parse_stream(stream)
 
         data, rest, tah = None, b'', None
-        if int(typedef.basetype) > int(BaseTypes.BT_FLOAT):  #only process advanced types; basic types have no special logic aside from optional tah
+        if typedef.basetype.intvalue > BaseTypes.BT_FLOAT.intvalue:  #only process advanced types; basic types have no special logic aside from optional tah
             if typedef.basetype == BaseTypes.BT_PTR:
                 #TODO it is db ([db sizeof(ptr)]; [tah-typeattrs]; type_t...)
                 #TODO test closure somehow
