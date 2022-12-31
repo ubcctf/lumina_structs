@@ -542,6 +542,58 @@ AttrMapping = con.Switch(lambda this: this.type, {
 }, default=TAFLAGS_SIZE)
 
 
+ArglocType = con.Enum(con.BytesInteger(1),
+  ALOC_NONE   = 0,  #< none
+  ALOC_STACK  = 1,  #< stack offset
+  ALOC_DIST   = 2,  #< distributed (scattered)
+  ALOC_REG1   = 3,  #< one register (and offset within it)
+  ALOC_REG2   = 4,  #< register pair
+  ALOC_RREL   = 5,  #< register relative
+  ALOC_STATIC = 6,  #< global address
+  ALOC_CUSTOM = 7,  #< custom argloc (7 or higher)
+)
+
+
+@singleton
+class ArgLoc(Construct):
+    r"""
+    construct adapter that handles (de)serialization of argloc_t
+    """
+
+    #only guaranteed field to exist is type - please check type before accessing fields
+    def _parse(self, stream, context, path):
+        #TODO test more thoroughly, esp the more complicated arglocs (pure reversed code again woohoo)
+        if (b:=stream_read(stream, 1, path)[0]) != 0xFF:
+            #simple serializations (basically most cases in Lumina)
+            val = (b & 0x7F) - 1
+            if b & 0b10000000:
+                if b == 0b10000000:   #0x80 == ALOC_STACK, unless retval which is forbidden (which we dont check here)
+                    data = con.Container(
+                        type = ArglocType.ALOC_STACK,
+                        stkoff = 0
+                    )
+                else:
+                    # high 16 bit reg2 / low 16 bit reg1 (main register number only, register size is to be computed by argument size)
+                    data = con.Container(
+                        type = ArglocType.ALOC_REG2,
+                        reginfo = con.Container(reg1=val, reg2=stream_read(stream, 1, path)[0] - 1)
+                    )
+            else:
+                data = con.Container(
+                    type = ArglocType.ALOC_REG1,
+                    reginfo = con.Container(reg=val, off=0),
+                )
+        else:
+            #TODO implement and test complex argloc serializations
+            pass
+
+        return data
+
+    def _build(self, obj, stream, context, path):
+        return obj
+
+
+
 @singleton
 class TypeInfo(Construct):
     r"""
@@ -588,6 +640,19 @@ class TypeInfo(Construct):
                 #likely not TAH or SDACL, reset file pointer and leave
                 stream.seek(stream.tell()-1)
         return None
+
+    #it's likely that we won't ever use ordinal outside of parsing (or even in Lumina at all since replace_ordinal_typerefs is always called) so not making another construct for this
+    def parse_ordinal_or_name(self, stream, path):
+        size = TypeVarInt15.parse_stream(stream)  #not used, but we need to read it like a string anyway
+        byte = stream.read(1)   #can't peek with all streams, implement it the dumb way instead
+        if byte:   #do something only when we read something
+            print(byte)
+            if byte == b'#':  #ordinal
+                return '#' + str(TypeVarInt32.parse_stream(stream))
+            else:
+                stream.seek(stream.tell()-1)  #go back since it's not an ordinal
+                return stream_read(stream, size, path)  #it's easier to just do this instead of using TypeInfoString since size is already consumed
+
 
     def _parse(self, stream, context, path):
         typedef = type_t.parse_stream(stream)
@@ -652,15 +717,16 @@ class TypeInfo(Construct):
 
                     spoiled = con.Container(bfa=bfa, ftiflags=ftiflags, regs=con.ListContainer(regs))
 
+                    cm = cm_t.parse_stream(stream)
+
                 tah = self.check_tah_or_sdacl(stream, typedef.basetype, path)
 
                 rettype = TypeInfo.parse_stream(stream)
 
                 argloc = None
                 check_argloc = cm.convention in [CallingConvention.CM_CC_SPECIAL, CallingConvention.CM_CC_SPECIALP, CallingConvention.CM_CC_SPECIALE]
-                if check_argloc and rettype.basetype != BaseTypes.BT_VOID:
-                    #TODO extract_argloc and test
-                    pass
+                if check_argloc and rettype.typedef.basetype != BaseTypes.BT_VOID:
+                    argloc = ArgLoc.parse_stream(stream)
                 
                 #empty list = void arg, None = unknown arg; otherwise container, with type = BT_UNK for ellipsis or actual arg type
                 params = []
@@ -675,13 +741,13 @@ class TypeInfo(Construct):
                     else:
                         for _ in range(n):
                             argtype = TypeInfo.parse_stream(stream)
-                            argargloc = None if check_argloc else None   #TODO extract_argloc
-                            if (b:=stream.read(1)) and b[0] == FAH_BYTE:   #don't use stream_read since it's optional
-                                #TODO test
-                                argflags = FuncArgFlags.parse_stream(stream)
-                            else:
-                                stream.seek(stream.tell()-1)   #reset since that is not actually a FAH byte
-                                argflags = None
+                            argargloc = ArgLoc.parse_stream(stream) if check_argloc else None
+                            argflags = None
+                            if (b:=stream.read(1)): #don't use stream_read since it's optional
+                                if b[0] == FAH_BYTE:
+                                    argflags = FuncArgFlags.parse_stream(stream)
+                                else:
+                                    stream.seek(stream.tell()-1)   #reset since that is not actually a FAH byte; only when we read a byte in the first place
                             params.append(con.Container(type=argtype, argloc=argargloc, flags=argflags))
 
                 data = con.Container(spoiled=spoiled, cc=cm, rettype=rettype, argloc=argloc, params=con.ListContainer(params))
@@ -689,7 +755,7 @@ class TypeInfo(Construct):
             elif typedef.basetype == BaseTypes.BT_COMPLEX:
                 if typedef.flags == ComplexFlags.BTMT_TYPEDEF:
                     #only useful complex type wrt Lumina - see comment below
-                    data = con.Container(name=TypeInfoString.parse_stream(stream))
+                    data = con.Container(name=self.parse_ordinal_or_name(stream, path))
                 else:
                     #IDA does not push typerefs verbatim - instead it represents it as a typedef with the ordinal string ('#' + set_de(ord)) as name
                     #Lumina (calc_func_metadata) always call replace_ordinal_typerefs before serialize_tinfo, so instead of the ordinal string it is replaced with the actual type name
@@ -700,7 +766,7 @@ class TypeInfo(Construct):
 
                     n = TypeVarInt15.parse_stream(stream)
                     if n == 0:  #treat the same as a typedef if there are no member fields
-                        data = con.Container(name=TypeInfoString.parse_stream(stream))
+                        data = con.Container(name=self.parse_ordinal_or_name(stream, path))
                         tah = self.check_tah_or_sdacl(stream, typedef.basetype, path, True)  #sdacl
                     else:
                         if n == 0x7FFE:   #support high member count; this is technically defined separately for enum and struct & union, but should work the same here
