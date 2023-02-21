@@ -1,5 +1,4 @@
 from .basetypes import *
-from .util import AttrDict
 import math
 
 @singleton
@@ -36,7 +35,6 @@ class TypeVarInt15(Construct):
 class TypeVarInt32(Construct):
     r"""
     construct adapter that handles (de)serialization of tinfo_t de types (see get_de)
-    40bit base / 40bit num_elems
     """
 
     def _parse(self, stream, context, path):
@@ -112,10 +110,8 @@ class TypeArrayData(Construct):
         if obj > 0x7FFE:
             raise IntegerError("cannot build from number above 0x7FFE: %r" % (obj,), path=path)
 
-        if type(obj) == dict:
-            obj = AttrDict(obj)
 
-        bv, nev = obj.base, obj.num_elems
+        bv, nev = obj['base'], obj['num_elems']
         bb, bne = [], []
 
         while bv:
@@ -314,7 +310,7 @@ BitFieldFlags = con.Enum(FLAGS_SIZE,
 
 # end flags
 
-FlagsMapping = con.Switch(lambda this: this.basetype, {
+FlagsMapping = con.Switch(con.this.basetype, {
     BaseTypes.BT_VOID    : VoidFlags,
     BaseTypes.BT_INT8    : IntFlags,
     BaseTypes.BT_INT16   : IntFlags,
@@ -474,7 +470,7 @@ OutputStyle = con.Enum(con.BitsInteger(2),
 )
 
 bte_t = con.BitStruct(
-    "always" / con.ExprValidator(con.Flag, lambda obj,_: obj),        #< this bit MUST be present (failfast)
+    "always" / con.ExprValidator(con.Flag, con.obj_),                 #< this bit MUST be present (failfast)
     "style" / OutputStyle,                                            #< output style mask
     "bitfield" / con.Flag,                                            #< 'subarrays'. In this case ANY record
                                                                       #< has the following format:
@@ -483,7 +479,7 @@ bte_t = con.BitStruct(
                                                                       #<   - cnt records of 'de' values
                                                                       #<      (cnt CAN be 0)
                                                                       #< \note delta for ALL subsegment is ONE
-    "reserved" / con.ExprValidator(con.Flag, lambda obj,_: not obj),  #< must be 0, in order to distinguish
+    "reserved" / con.ExprValidator(con.Flag, not con.obj_),           #< must be 0, in order to distinguish
                                                                       #< from a tah-byte
     "size" / con.ExprAdapter(con.BitsInteger(3),                      #< storage size.
                                 lambda n,_: 1 << (n-1) if n else -1,  #<   - if == 0 then inf_get_cc_size_e()
@@ -534,7 +530,7 @@ EnumAttrFlags = con.FlagsEnum(TAFLAGS_SIZE,
 )
 
 #i believe these are the only ones that are implemented right now, but basically all types' format aside from bitfields have optional tah-typeattrs fields
-AttrMapping = con.Switch(lambda this: this.type, {
+AttrMapping = con.Switch(con.this.type, {
     BaseTypes.BT_PTR      : PtrAttrFlags,
     BaseTypes.BT_COMPLEX  : UdtAttrFlags,        #expects BT_COMPLEX to mean struct | union only
     ComplexFlags.BTMT_ENUM: EnumAttrFlags, 
@@ -608,7 +604,7 @@ class ArgLoc(Construct):
                     parts = con.ListContainer(parts)
                 )
             else:
-                #pther serializations (honestly a lot of these are overlapping, it's just that the namings are different)
+                #other serializations (honestly a lot of these are overlapping, it's just that the namings are different)
                 type = val + 1   #for some reason it has to be +1'd (aka directly using the byte value instead) - makes sense since all types fit in a byte normally but still weird
                 if type == ArglocType.ALOC_STACK.intvalue:
                     #seems like even though sval_t -> adiff_t -> dependent on arch size when it comes to argloc_t it is always 64 bit
@@ -715,8 +711,8 @@ class TypeInfo(Construct):
         data, rest, tah = None, b'', None
         if typedef.basetype.intvalue > BaseTypes.BT_FLOAT.intvalue:  #only process advanced types; basic types have no special logic aside from optional tah
             if typedef.basetype == BaseTypes.BT_PTR:
-                #TODO it is db ([db sizeof(ptr)]; [tah-typeattrs]; type_t...)
                 #TODO test closure somehow
+                #db sizeof(ptr) seems to be exactly behaving like a byte? i guess this makes sense since allowed values are from 1 onwards
                 size = stream_read(stream, 1, path)  #even if we dont have size we must still have at least 1 byte left
                 if typedef.flags != PtrFlags.BTMT_CLOSURE: #if not closure theres no ptr size
                     stream.seek(stream.tell()-1)

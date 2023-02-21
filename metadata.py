@@ -1,10 +1,9 @@
 import construct as con
 from .basetypes import *
-from .util import AttrDict
-import io
 import copy
 from .tinfo import *
 
+#TODO make this generic
 class _SignedVarInt64Adapter(con.Adapter):
     def _decode(self, obj, context, path):
         res = obj - 1
@@ -96,16 +95,10 @@ class InsnAnnotations(con.Subconstruct):
         if not obj:
             return
 
-        if type(obj) == dict:
-            obj = AttrDict(obj)
-
         obj_it = iter(obj)
         first = next(obj_it)
 
-        if type(first) == dict:
-            first = AttrDict(first)
-
-        cur_offset = first.offset
+        cur_offset = first["offset"]
         self.subcon._build(first, stream, context, path)
 
         for sobj in obj_it:
@@ -162,7 +155,7 @@ Metadata_FrameDesc = con.Struct(
 )
 Metadata_InsnOpreprs = InsnAnnotations(InsnOprepr)
 
-Metadata = con.Switch(con.this.code, {
+Metadata = con.Switch(con.this.type, {
     MetadataType.MD_TYPE_INFO: Metadata_TypeInfo,
     MetadataType.MD_VD_ELAPSED: Metadata_VDElapsed,
     MetadataType.MD_FUNC_CMT: Metadata_FuncCmt,
@@ -176,46 +169,15 @@ Metadata = con.Switch(con.this.code, {
 }, default = None)
 
 
-#needs to be used with MetadataPayload to get the data parsed fully
 MetadataChunk = con.Struct(
     "type" / MetadataType,
-    "data" / VarBuff,
+    "data" / con.Prefixed(IdaVarInt32, Metadata),
 )
 
-@singleton
-class MetadataPayload(Construct):
-    r"""
-    construct adapter that handles (de)serialization of metadata payloads
-    """
-
-    def _parse(self, stream, context, path):
-        n = IdaVarInt32.parse_stream(stream)
-
-        mds = []
-
-        chunks = con.GreedyRange(MetadataChunk).parse(stream_read(stream, n, path))
-        for chunk in chunks:
-            chunkf = io.BytesIO(chunk.data)
-            chunkdata = Metadata.parse_stream(chunkf, code=chunk.type)
-            mds.append(con.Container(type=chunk.type, data=chunkdata, unparsed=chunkf.read()))
-
-        return con.Container(size=n, chunks=con.ListContainer(mds))
-
-    def _build(self, obj, stream, context, path):
-        payload = b''
-
-        if type(obj) == dict:
-            obj = AttrDict(obj)
-
-        for o in obj.chunks:
-            if type(o) == dict:
-                o = AttrDict(o)
-
-            md = Metadata.build(o.data, code=o.type)
-            payload += MetadataType.build(o.type) + IdaVarInt32.build(len(md)) + md + o.unparsed
-
-        payload = IdaVarInt32.build(len(payload)) + payload
-
-        stream_write(stream, payload, len(payload), path) 
-
-        return obj
+#requires seekable/tellable streams (rpc_message_parse has a special case for sockets that allow this already)
+MetadataPayload = con.ExprAdapter( #rename for backwards compatibility
+    con.RawCopy(con.Prefixed(IdaVarInt32, con.GreedyRange(MetadataChunk))),
+    #container and dicts both support accessing with keys, while only container supports accessing by attr
+    lambda c,_: con.Container(data=c['data'], chunks=c['value'], offset1=c['offset1'], offset2=c['offset2'], size=c['length']),
+    #only value/data is consumed by RawCopy, so remap only chunks if exist
+    lambda c,_: con.Container(**{'value' if k == 'chunks' else k:v for k,v in c.items()}))

@@ -145,8 +145,6 @@ class IdaVarInt64(Construct):
 VarString = con.PascalString(IdaVarInt32, "utf8")
 # Bytes buffer prefixed with a variable int size
 VarBuff = con.Prefixed(IdaVarInt32, con.GreedyBytes)
-# IDA typedefs
-ea_t = asize_t = adiff_t = con.ExprAdapter(IdaVarInt64, con.obj_-1, con.obj_+1)
 
 # "template" for defining object list, prefixed with a variable int size
 def ObjectList(obj):
