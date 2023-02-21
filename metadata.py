@@ -29,7 +29,8 @@ MetadataType = con.Enum(IdaVarInt32,
     MD_INSN_OPREPRS = 0x0a,
 )
 
-SerializedTypeInfo = con.NullTerminated(con.GreedyBytes, require=False)
+#SerializedTypeInfo = con.NullTerminated(con.GreedyBytes, require=False)
+SerializedTypeInfo = con.NullTerminated(TypeInfo, require=False)
 
 Metadata_TypeInfo = con.Struct(
     "is_auto" / con.Byte,

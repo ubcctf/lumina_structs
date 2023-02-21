@@ -697,7 +697,6 @@ class TypeInfo(Construct):
         size = TypeVarInt15.parse_stream(stream)  #not used in ordinals, but we need to read it like a string anyway
         byte = stream.read(1)   #can't peek with all streams, implement it the dumb way instead
         if byte:   #do something only when we read something
-            print(byte)
             if byte == b'#':  #ordinal
                 return '#' + str(TypeVarInt32.parse_stream(stream))
             else:
